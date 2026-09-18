@@ -75,6 +75,9 @@ adds the requested announcement protection:
 - Tick 223: flatten every option and RTM position; tick 224: rebuild only after new news.
 - If the API has not published a new news item yet, the bot remains flat instead of
   trading from the previous volatility forecast.
+- At tick 0, the scheduled version requires a parseable volatility announcement;
+  it never opens a position using the 20% fallback assumption. Console output
+  identifies the accepted value with `source=NEWS`.
 
 Run this alternative with:
 
