@@ -32,12 +32,11 @@ class Settings:
     base_url: str = os.getenv("RIT_BASE_URL", "http://localhost:9999/v1")
     api_key: str = os.getenv("RIT_API_KEY", "")
     risk_free_rate: float = float(os.getenv("RIT_RISK_FREE_RATE", "0.0"))
-    poll_seconds: float = float(os.getenv("RIT_POLL_SECONDS", "0.35"))
-    edge_threshold: float = float(os.getenv("RIT_EDGE_THRESHOLD", "0.06"))
-    exit_threshold: float = float(os.getenv("RIT_EXIT_THRESHOLD", "0.025"))
-    target_contracts: int = int(os.getenv("RIT_TARGET_CONTRACTS", "200"))
+    poll_seconds: float = float(os.getenv("RIT_POLL_SECONDS", "0.50"))
+    edge_threshold: float = float(os.getenv("RIT_EDGE_THRESHOLD", "0.08"))
+    target_contracts: int = int(os.getenv("RIT_TARGET_CONTRACTS", "75"))
     option_order_size: int = int(os.getenv("RIT_OPTION_ORDER_SIZE", "50"))
-    hedge_trigger: int = int(os.getenv("RIT_HEDGE_TRIGGER", "1000"))
+    hedge_trigger: int = int(os.getenv("RIT_HEDGE_TRIGGER", "4500"))
     stop_opening_ticks: int = int(os.getenv("RIT_STOP_OPENING_TICKS", "12"))
     default_total_ticks: int = int(os.getenv("RIT_TOTAL_TICKS", "600"))
 
@@ -128,31 +127,37 @@ def parse_option(ticker: str) -> tuple[float, str]:
     return float(match.group(1)), match.group(2)
 
 
-def news_text(items: Iterable[dict[str, Any]]) -> str:
-    ordered = sorted(items, key=lambda x: int(x.get("news_id", 0)))
-    return "\n".join(
-        " ".join(str(item.get(k, "")) for k in ("headline", "body")) for item in ordered
-    )
-
-
 def volatility_from_news(items: Iterable[dict[str, Any]], fallback: float = 0.20) -> float:
-    """Use the newest exact weekly forecast; otherwise the newest range midpoint."""
-    text = news_text(items)
-    exact = re.findall(
-        r"(?:this|current)\s+week[^%]{0,100}?(\d+(?:\.\d+)?)\s*%", text, re.I
+    """Use the newest exact forecast or range midpoint, whichever arrived last."""
+    forecast = fallback
+    ordered = sorted(items, key=lambda x: int(x.get("news_id", 0)))
+    for item in ordered:
+        text = " ".join(str(item.get(k, "")) for k in ("headline", "body"))
+        exact = re.search(
+            r"(?:this|current)\s+week[^%]{0,100}?(\d+(?:\.\d+)?)\s*%",
+            text,
+            re.I,
+        )
+        ranges = re.search(
+            r"next\s+week[^%]{0,100}?(\d+(?:\.\d+)?)\s*(?:-|to|and)\s*"
+            r"(\d+(?:\.\d+)?)\s*%",
+            text,
+            re.I,
+        )
+        if exact:
+            forecast = float(exact.group(1)) / 100.0
+        elif ranges:
+            lo, hi = float(ranges.group(1)), float(ranges.group(2))
+            forecast = (lo + hi) / 200.0
+    return forecast
+
+
+def news_signature(items: Iterable[dict[str, Any]]) -> tuple[str, ...]:
+    """Create a stable identity for the currently available news set."""
+    return tuple(
+        f"{item.get('news_id', '')}|{item.get('headline', '')}|{item.get('body', '')}"
+        for item in sorted(items, key=lambda x: int(x.get("news_id", 0)))
     )
-    if exact:
-        return float(exact[-1]) / 100.0
-    ranges = re.findall(
-        r"next\s+week[^%]{0,100}?(\d+(?:\.\d+)?)\s*(?:-|to|and)\s*"
-        r"(\d+(?:\.\d+)?)\s*%",
-        text,
-        re.I,
-    )
-    if ranges:
-        lo, hi = map(float, ranges[-1])
-        return (lo + hi) / 200.0
-    return fallback
 
 
 def as_map(securities: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -225,30 +230,33 @@ def choose_straddle(
     securities: dict[str, dict[str, Any]], spot: float, years: float, sigma: float, rate: float
 ) -> tuple[int, float, str] | None:
     """Return strike, executable per-share edge, and BUY/SELL direction."""
-    candidates: list[tuple[float, int, str]] = []
-    for strike in range(48, 53):
-        call = securities.get(f"RTM{strike}C")
-        put = securities.get(f"RTM{strike}P")
-        if not call or not put:
-            continue
-        fair_call, _ = black_scholes(spot, strike, years, rate, sigma, "C")
-        fair_put, _ = black_scholes(spot, strike, years, rate, sigma, "P")
-        buy_edge = fair_call + fair_put - float(call["ask"]) - float(put["ask"])
-        sell_edge = float(call["bid"]) + float(put["bid"]) - fair_call - fair_put
-        # Prefer near-ATM contracts when edges are similar; their straddle delta is smallest.
-        distance_penalty = 0.002 * abs(strike - spot)
-        candidates.append((buy_edge - distance_penalty, strike, "BUY"))
-        candidates.append((sell_edge - distance_penalty, strike, "SELL"))
-    if not candidates:
+    # Lock to one nearest-to-the-money strike. Searching every strike every loop
+    # caused the first version to switch contracts and pay unnecessary costs.
+    available = [
+        strike
+        for strike in range(48, 53)
+        if f"RTM{strike}C" in securities and f"RTM{strike}P" in securities
+    ]
+    if not available:
         return None
-    edge, strike, direction = max(candidates)
-    return strike, edge, direction
+    strike = min(available, key=lambda value: abs(value - spot))
+    call = securities[f"RTM{strike}C"]
+    put = securities[f"RTM{strike}P"]
+    fair_call, _ = black_scholes(spot, strike, years, rate, sigma, "C")
+    fair_put, _ = black_scholes(spot, strike, years, rate, sigma, "P")
+    buy_edge = fair_call + fair_put - float(call["ask"]) - float(put["ask"])
+    sell_edge = float(call["bid"]) + float(put["bid"]) - fair_call - fair_put
+    if buy_edge >= sell_edge:
+        return strike, buy_edge, "BUY"
+    return strike, sell_edge, "SELL"
 
 
 def run() -> None:
     settings = Settings()
     client = RITClient(settings)
     running = True
+    last_news: tuple[str, ...] | None = None
+    option_targets = {ticker: 0 for ticker in OPTION_TICKERS}
 
     def stop(*_: Any) -> None:
         nonlocal running
@@ -272,25 +280,47 @@ def run() -> None:
             if "RTM" not in securities:
                 raise RuntimeError("RTM was not returned by GET /securities")
             spot = mid(securities["RTM"])
-            sigma = volatility_from_news(client.news())
+            news_items = client.news()
+            sigma = volatility_from_news(news_items)
             positions = {t: int(s.get("position", 0)) for t, s in securities.items()}
 
-            choice = choose_straddle(securities, spot, years, sigma, settings.risk_free_rate)
-            if choice:
-                strike, edge, direction = choice
-                active_tickers = {f"RTM{strike}C", f"RTM{strike}P"}
+            signature = news_signature(news_items)
+            if signature and signature != last_news:
+                last_news = signature
+                option_targets = {ticker: 0 for ticker in OPTION_TICKERS}
+                choice = choose_straddle(
+                    securities, spot, years, sigma, settings.risk_free_rate
+                )
                 opening_allowed = tick < total_ticks - settings.stop_opening_ticks
-                desired = settings.target_contracts * (1 if direction == "BUY" else -1)
-                if not opening_allowed or edge < settings.edge_threshold:
-                    desired = 0
-                for ticker in OPTION_TICKERS:
-                    current = positions.get(ticker, 0)
-                    if ticker not in active_tickers:
-                        target = 0
+                if choice and opening_allowed:
+                    strike, edge, direction = choice
+                    if edge >= settings.edge_threshold:
+                        desired = settings.target_contracts * (
+                            1 if direction == "BUY" else -1
+                        )
+                        option_targets[f"RTM{strike}C"] = desired
+                        option_targets[f"RTM{strike}P"] = desired
+                        print(
+                            f"NEW SIGNAL news={len(signature)} strike={strike} "
+                            f"side={direction} edge={edge:.3f} target={desired}"
+                        )
                     else:
-                        # A smaller exit threshold avoids churning around the entry threshold.
-                        target = desired if desired or edge < settings.exit_threshold else current
-                    submit_toward(client, ticker, current, target, positions, settings)
+                        print(
+                            f"NO TRADE news={len(signature)}: best ATM edge "
+                            f"{edge:.3f} is below {settings.edge_threshold:.3f}"
+                        )
+
+            # Work toward the fixed target but never recalculate it between news
+            # releases. This prevents quote noise from triggering round trips.
+            for ticker in OPTION_TICKERS:
+                submit_toward(
+                    client,
+                    ticker,
+                    positions.get(ticker, 0),
+                    option_targets[ticker],
+                    positions,
+                    settings,
+                )
 
             # Re-read positions after option fills, then hedge the full portfolio.
             securities = as_map(client.securities())
