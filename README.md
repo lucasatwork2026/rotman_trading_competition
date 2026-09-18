@@ -80,6 +80,9 @@ adds the requested announcement protection:
   20% fallback or the news value for option pricing.
 - Scheduled re-entry at ticks 74, 149, and 224 uses the latest RTM realized-volatility
   estimate and is identified in the console with `source=RTM_REALIZED`.
+- While flat, it retries the signal every five ticks until an executable edge is
+  available; after opening, it locks the target to prevent transaction-cost churn.
+- The market-data version uses a $0.05 executable-edge threshold by default.
 
 Run this alternative with:
 
