@@ -1,9 +1,10 @@
 import math
+import statistics
 import unittest
 
 from strategy_scheduled_flatten import (
     flatten_tick_due,
-    required_volatility_from_news,
+    realized_volatility_from_prices,
 )
 
 
@@ -20,18 +21,17 @@ class ScheduledFlattenTests(unittest.TestCase):
         self.assertIsNone(flatten_tick_due(74, {73}))
         self.assertIsNone(flatten_tick_due(75, set()))
 
-    def test_generic_tick_zero_volatility_news(self):
-        news = [
-            {
-                "news_id": 1,
-                "headline": "Analyst update",
-                "body": "The annualized volatility of RTM is 24%.",
-            }
-        ]
-        self.assertEqual(required_volatility_from_news(news), 0.24)
+    def test_realized_volatility_uses_market_returns(self):
+        prices = [100.0, 101.0, 99.99]
+        sigma = realized_volatility_from_prices(prices, total_ticks=600, window=30)
+        self.assertGreater(sigma, 0)
 
-    def test_no_news_never_uses_default(self):
-        self.assertTrue(math.isnan(required_volatility_from_news([])))
+    def test_realized_volatility_annualization(self):
+        # Log returns are +1% and -1%; annualize from 600 ticks per case month.
+        prices = [100.0, 100.0 * math.exp(0.01), 100.0]
+        expected = statistics.stdev([0.01, -0.01]) * math.sqrt(600 * 12)
+        actual = realized_volatility_from_prices(prices, 600)
+        self.assertAlmostEqual(actual, expected)
 
 
 if __name__ == "__main__":
