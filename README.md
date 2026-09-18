@@ -65,6 +65,25 @@ Start with the defaults in a practice heat. Confirm the exact option ticker name
 news wording, total ticks, and API port before increasing size. This is a competition
 template, not a guarantee of profit.
 
+## Scheduled pre-news flatten alternative
+
+`strategy_scheduled_flatten.py` preserves the version 2 signal and risk logic but
+adds the requested announcement protection:
+
+- Tick 74: flatten every option and RTM position; tick 75: rebuild only after new news.
+- Tick 149: flatten every option and RTM position; tick 150: rebuild only after new news.
+- Tick 224: flatten every option and RTM position; tick 225: rebuild only after new news.
+- If the API has not published a new news item yet, the bot remains flat instead of
+  trading from the previous volatility forecast.
+
+Run this alternative with:
+
+```bash
+python strategy_scheduled_flatten.py
+```
+
+The original `strategy.py` remains unchanged and available.
+
 ## Test without placing orders
 
 The included tests exercise pricing, news parsing, time scaling, and risk guards;
