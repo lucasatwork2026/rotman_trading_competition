@@ -7,6 +7,8 @@ waits for a genuinely new news item before rebuilding the ATM straddle.
 
 from __future__ import annotations
 
+import math
+import re
 import time
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -37,6 +39,31 @@ def flatten_tick_due(tick: int, completed: set[int]) -> tuple[int, int] | None:
         if flatten_tick not in completed and flatten_tick <= tick <= reentry_tick:
             return flatten_tick, reentry_tick
     return None
+
+
+def required_volatility_from_news(items: list[dict[str, Any]]) -> float:
+    """Parse actual news and return NaN rather than an assumed fallback."""
+    sigma = volatility_from_news(items, fallback=float("nan"))
+    if math.isfinite(sigma):
+        return sigma
+
+    # Some RIT cases use generic tick-zero wording rather than "this week."
+    for item in sorted(items, key=lambda x: int(x.get("news_id", 0))):
+        text = " ".join(str(item.get(k, "")) for k in ("headline", "body"))
+        if "volatil" not in text.lower():
+            continue
+        range_match = re.search(
+            r"(\d+(?:\.\d+)?)\s*(?:-|to|and)\s*(\d+(?:\.\d+)?)\s*%",
+            text,
+            re.I,
+        )
+        values = re.findall(r"(\d+(?:\.\d+)?)\s*%", text)
+        if range_match:
+            lo, hi = float(range_match.group(1)), float(range_match.group(2))
+            sigma = (lo + hi) / 200.0
+        elif values:
+            sigma = float(values[-1]) / 100.0
+    return sigma
 
 
 def signal_targets(
@@ -127,7 +154,16 @@ def run() -> None:
             spot = mid(securities["RTM"])
             news_items = client.news()
             signature = news_signature(news_items)
-            sigma = volatility_from_news(news_items)
+            # This version never trades from the 20% default. At tick 0 it waits
+            # until actual news contains a parseable volatility value.
+            sigma = required_volatility_from_news(news_items)
+            if not math.isfinite(sigma):
+                print(
+                    f"WAITING tick={tick}: actual volatility news is not "
+                    "available or could not be parsed"
+                )
+                time.sleep(settings.poll_seconds)
+                continue
             positions = {
                 ticker: int(sec.get("position", 0))
                 for ticker, sec in securities.items()
@@ -241,7 +277,7 @@ def run() -> None:
             )
             print(
                 f"tick={tick:>3}/{total_ticks} state={state} spot={spot:.2f} "
-                f"forecast_vol={sigma:.1%} delta={delta:,.0f}"
+                f"forecast_vol={sigma:.1%} source=NEWS delta={delta:,.0f}"
             )
         except (HTTPError, URLError, TimeoutError) as exc:
             print(f"API error: {exc}")
