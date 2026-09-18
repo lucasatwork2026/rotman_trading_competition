@@ -7,12 +7,12 @@ with RTM while maintaining buffers below every stated case limit.
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
 import signal
 import time
-import json
 from dataclasses import dataclass
 from statistics import NormalDist
 from typing import Any, Iterable
@@ -278,14 +278,18 @@ def run() -> None:
             choice = choose_straddle(securities, spot, years, sigma, settings.risk_free_rate)
             if choice:
                 strike, edge, direction = choice
+                active_tickers = {f"RTM{strike}C", f"RTM{strike}P"}
                 opening_allowed = tick < total_ticks - settings.stop_opening_ticks
                 desired = settings.target_contracts * (1 if direction == "BUY" else -1)
                 if not opening_allowed or edge < settings.edge_threshold:
                     desired = 0
-                for ticker in (f"RTM{strike}C", f"RTM{strike}P"):
+                for ticker in OPTION_TICKERS:
                     current = positions.get(ticker, 0)
-                    # A smaller exit threshold avoids churning around the entry threshold.
-                    target = desired if desired or edge < settings.exit_threshold else current
+                    if ticker not in active_tickers:
+                        target = 0
+                    else:
+                        # A smaller exit threshold avoids churning around the entry threshold.
+                        target = desired if desired or edge < settings.exit_threshold else current
                     submit_toward(client, ticker, current, target, positions, settings)
 
             # Re-read positions after option fills, then hedge the full portfolio.
