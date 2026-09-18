@@ -70,9 +70,9 @@ template, not a guarantee of profit.
 `strategy_scheduled_flatten.py` preserves the version 2 signal and risk logic but
 adds the requested announcement protection:
 
-- Tick 74: flatten every option and RTM position; tick 75: rebuild only after new news.
-- Tick 149: flatten every option and RTM position; tick 150: rebuild only after new news.
-- Tick 224: flatten every option and RTM position; tick 225: rebuild only after new news.
+- Tick 73: flatten every option and RTM position; tick 74: rebuild only after new news.
+- Tick 148: flatten every option and RTM position; tick 149: rebuild only after new news.
+- Tick 223: flatten every option and RTM position; tick 224: rebuild only after new news.
 - If the API has not published a new news item yet, the bot remains flat instead of
   trading from the previous volatility forecast.
 
