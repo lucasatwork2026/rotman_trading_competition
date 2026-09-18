@@ -3,6 +3,7 @@ import unittest
 from strategy import (
     Settings,
     black_scholes,
+    news_signature,
     remaining_years,
     risk_ok,
     volatility_from_news,
@@ -27,6 +28,20 @@ class StrategyTests(unittest.TestCase):
     def test_news_range_midpoint(self):
         news = [{"news_id": 1, "body": "Volatility for next week will be between 27-30%."}]
         self.assertAlmostEqual(volatility_from_news(news), 0.285)
+
+    def test_newer_range_replaces_older_exact_forecast(self):
+        news = [
+            {"news_id": 1, "body": "Realized volatility for this week will be 20%."},
+            {"news_id": 2, "body": "Volatility for next week will be between 27-30%."},
+        ]
+        self.assertAlmostEqual(volatility_from_news(news), 0.285)
+
+    def test_news_signature_changes_only_with_news(self):
+        first = [{"news_id": 1, "headline": "Weekly volatility", "body": "20%"}]
+        same = list(reversed(first))
+        second = first + [{"news_id": 2, "headline": "Update", "body": "27-30%"}]
+        self.assertEqual(news_signature(first), news_signature(same))
+        self.assertNotEqual(news_signature(first), news_signature(second))
 
     def test_remaining_case_month(self):
         self.assertAlmostEqual(remaining_years(0, 600), 1 / 12)
