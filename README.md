@@ -84,6 +84,25 @@ python strategy_scheduled_flatten.py
 
 The original `strategy.py` remains unchanged and available.
 
+### Round metrics and P&L files
+
+The scheduled-flatten strategy automatically creates a `rit_logs` folder. It
+records each round in four CSV outputs:
+
+- `*_metrics.csv`: one row per tick with realized, unrealized, and total P&L,
+  delta, limits, option gross/net exposure, peak P&L, and drawdown.
+- `*_positions.csv`: bid, ask, last, VWAP, position, and P&L for every ticker.
+- `*_trades.csv`: every order submitted by the strategy and its reason.
+- `round_summaries.csv`: one row per completed round with ending P&L, maximum
+  drawdown, order count, and ETF/option trading volume.
+
+To save logs elsewhere, set `RIT_LOG_DIR` before starting:
+
+```powershell
+$env:RIT_LOG_DIR="$HOME\Documents\RIT_Competition_Logs"
+python .\strategy_scheduled_flatten.py
+```
+
 ## Test without placing orders
 
 The included tests exercise pricing, news parsing, time scaling, and risk guards;
