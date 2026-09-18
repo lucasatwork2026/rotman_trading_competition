@@ -28,7 +28,7 @@ from strategy import (
 
 
 # Flatten one tick before the scheduled new-volatility announcements.
-FLATTEN_TO_REENTRY = {74: 75, 149: 150, 224: 225}
+FLATTEN_TO_REENTRY = {73: 74, 148: 149, 223: 224}
 
 
 def flatten_tick_due(tick: int, completed: set[int]) -> tuple[int, int] | None:
@@ -93,7 +93,7 @@ def run() -> None:
 
     print(
         "Scheduled-flatten strategy started. "
-        "Pre-news flatten ticks: 74, 149, 224. Press Ctrl+C to stop."
+        "Pre-news flatten ticks: 73, 148, 223. Press Ctrl+C to stop."
     )
 
     while True:
