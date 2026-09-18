@@ -1,22 +1,24 @@
 # RITCx Volatility Trading Strategy
 
 A simple, conservative Python bot for the RTM volatility case. It reads analyst
-volatility news, values European options with Black-Scholes, trades the best
+volatility news, values European options with Black-Scholes, trades one
 near-the-money straddle only when its executable edge clears transaction costs,
-and delta-hedges with RTM.
+and delta-hedges with RTM. Version 2 locks its target until the next news release
+to prevent spread, commission, and hedge churn.
 
 ## Rule safeguards
 
-- Targets portfolio delta near zero and starts hedging at 1,000 shares-equivalent,
-  well inside the official +/-7,000 penalty boundary.
+- Rehedges only when portfolio delta reaches 4,500 shares-equivalent, remaining
+  inside the official +/-7,000 boundary while avoiding excessive ETF fees.
 - Uses an ETF cap of 48,000 versus the official 50,000-share gross/net limit.
 - Uses option caps of 2,400 gross and 900 net versus official limits of 2,500 and
   1,000 contracts.
-- Limits option child orders to 50 contracts (official maximum: 100) so one fill
+- Targets only 75 contracts per straddle leg and limits child orders to 50
+  contracts (official maximum: 100), so one fill
   cannot normally create more than 5,000 shares-equivalent of temporary delta.
 - Limits ETF orders to the official 10,000-share maximum.
 - Values buys at the ask and sells at the bid; the default edge threshold is
-  $0.06 per option share, covering the two option commissions ($0.04 per straddle
+  $0.08 per option share, covering the two option commissions ($0.04 per straddle
   share) plus a safety margin.
 - Stops opening new positions near expiry and relies on the case's automatic ETF
   close-out and cash settlement of European options.
@@ -52,11 +54,10 @@ Environment variables allow changes without editing code:
 
 | Variable | Default | Meaning |
 |---|---:|---|
-| `RIT_EDGE_THRESHOLD` | `0.06` | Minimum executable straddle edge per option share |
-| `RIT_EXIT_THRESHOLD` | `0.025` | Lower threshold used to avoid rapid entry/exit churn |
-| `RIT_TARGET_CONTRACTS` | `200` | Target contracts in each straddle leg |
+| `RIT_EDGE_THRESHOLD` | `0.08` | Minimum executable straddle edge per option share |
+| `RIT_TARGET_CONTRACTS` | `75` | Target contracts in each straddle leg |
 | `RIT_OPTION_ORDER_SIZE` | `50` | Contracts per child order; never exceeds 100 |
-| `RIT_HEDGE_TRIGGER` | `1000` | Delta magnitude that triggers an ETF hedge |
+| `RIT_HEDGE_TRIGGER` | `4500` | Delta magnitude that triggers an ETF hedge |
 | `RIT_RISK_FREE_RATE` | `0.0` | Annual continuously compounded rate |
 | `RIT_TOTAL_TICKS` | `600` | Fallback ticks per case if the API omits it |
 
