@@ -1,14 +1,15 @@
-"""RIT volatility strategy with scheduled pre-news flattening.
+"""RIT volatility strategy with scheduled pre-announcement flattening.
 
 This is an alternative to strategy.py. It closes all RTM option and ETF
 positions immediately before the scheduled volatility announcements, then
-waits for a genuinely new news item before rebuilding the ATM straddle.
+rebuilds the ATM straddle from rolling RTM realized volatility.
 """
 
 from __future__ import annotations
 
 import math
-import re
+import os
+import statistics
 import time
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -21,16 +22,16 @@ from strategy import (
     as_map,
     choose_straddle,
     mid,
-    news_signature,
     portfolio_delta,
     remaining_years,
     submit_toward,
-    volatility_from_news,
 )
 
 
 # Flatten one tick before the scheduled new-volatility announcements.
 FLATTEN_TO_REENTRY = {73: 74, 148: 149, 223: 224}
+WARMUP_END_TICK = 10
+RV_WINDOW = int(os.getenv("RIT_RV_WINDOW", "30"))
 
 
 def flatten_tick_due(tick: int, completed: set[int]) -> tuple[int, int] | None:
@@ -41,29 +42,23 @@ def flatten_tick_due(tick: int, completed: set[int]) -> tuple[int, int] | None:
     return None
 
 
-def required_volatility_from_news(items: list[dict[str, Any]]) -> float:
-    """Parse actual news and return NaN rather than an assumed fallback."""
-    sigma = volatility_from_news(items, fallback=float("nan"))
-    if math.isfinite(sigma):
-        return sigma
-
-    # Some RIT cases use generic tick-zero wording rather than "this week."
-    for item in sorted(items, key=lambda x: int(x.get("news_id", 0))):
-        text = " ".join(str(item.get(k, "")) for k in ("headline", "body"))
-        if "volatil" not in text.lower():
-            continue
-        range_match = re.search(
-            r"(\d+(?:\.\d+)?)\s*(?:-|to|and)\s*(\d+(?:\.\d+)?)\s*%",
-            text,
-            re.I,
-        )
-        values = re.findall(r"(\d+(?:\.\d+)?)\s*%", text)
-        if range_match:
-            lo, hi = float(range_match.group(1)), float(range_match.group(2))
-            sigma = (lo + hi) / 200.0
-        elif values:
-            sigma = float(values[-1]) / 100.0
-    return sigma
+def realized_volatility_from_prices(
+    prices: list[float], total_ticks: int, window: int = RV_WINDOW
+) -> float:
+    """Annualized sample volatility of rolling RTM mid-price log returns."""
+    selected = prices[-(window + 1) :]
+    if len(selected) < 3:
+        return float("nan")
+    returns = [
+        math.log(current / previous)
+        for previous, current in zip(selected, selected[1:])
+        if previous > 0 and current > 0
+    ]
+    if len(returns) < 2:
+        return float("nan")
+    # The full case represents 20/240 = 1/12 trading years.
+    ticks_per_year = total_ticks * 12
+    return statistics.stdev(returns) * math.sqrt(ticks_per_year)
 
 
 def signal_targets(
@@ -111,10 +106,12 @@ def run() -> None:
     client = RITClient(settings)
 
     option_targets = {ticker: 0 for ticker in OPTION_TICKERS}
-    last_news: tuple[str, ...] | None = None
     completed_flats: set[int] = set()
-    awaiting_news_after: int | None = None
+    scheduled_reentry_tick: int | None = None
     last_period: int | None = None
+    observed_prices: list[float] = []
+    last_observed_tick: int | None = None
+    initial_signal_created = False
     recorder = RoundRecorder()
     was_active = False
 
@@ -138,9 +135,11 @@ def run() -> None:
             if period != last_period:
                 last_period = period
                 option_targets = {ticker: 0 for ticker in OPTION_TICKERS}
-                last_news = None
                 completed_flats.clear()
-                awaiting_news_after = None
+                scheduled_reentry_tick = None
+                observed_prices = []
+                last_observed_tick = None
+                initial_signal_created = False
                 recorder.start_round(period)
                 print(f"PERIOD {period}: schedule state reset")
 
@@ -152,18 +151,10 @@ def run() -> None:
                 raise RuntimeError("RTM was not returned by GET /securities")
 
             spot = mid(securities["RTM"])
-            news_items = client.news()
-            signature = news_signature(news_items)
-            # This version never trades from the 20% default. At tick 0 it waits
-            # until actual news contains a parseable volatility value.
-            sigma = required_volatility_from_news(news_items)
-            if not math.isfinite(sigma):
-                print(
-                    f"WAITING tick={tick}: actual volatility news is not "
-                    "available or could not be parsed"
-                )
-                time.sleep(settings.poll_seconds)
-                continue
+            if tick != last_observed_tick:
+                observed_prices.append(spot)
+                last_observed_tick = tick
+            sigma = realized_volatility_from_prices(observed_prices, total_ticks)
             positions = {
                 ticker: int(sec.get("position", 0))
                 for ticker, sec in securities.items()
@@ -174,20 +165,21 @@ def run() -> None:
             if due:
                 flatten_tick, reentry_tick = due
                 completed_flats.add(flatten_tick)
-                awaiting_news_after = reentry_tick
+                scheduled_reentry_tick = reentry_tick
                 option_targets = {ticker: 0 for ticker in OPTION_TICKERS}
-                # Snapshot existing news so it cannot trigger a stale re-entry.
-                last_news = signature
                 just_flattened = True
                 print(
-                    f"PRE-NEWS FLATTEN at tick={tick}; waiting for new news "
-                    f"at or after tick={reentry_tick}"
+                    f"PRE-NEWS FLATTEN at tick={tick}; scheduled market-volatility "
+                    f"re-entry at tick={reentry_tick}"
                 )
 
             if not just_flattened:
-                new_information = bool(signature) and signature != last_news
-                if awaiting_news_after is not None:
-                    if tick >= awaiting_news_after and new_information:
+                if tick < WARMUP_END_TICK:
+                    option_targets = {ticker: 0 for ticker in OPTION_TICKERS}
+                elif not math.isfinite(sigma):
+                    print(f"WAITING tick={tick}: insufficient RTM return history")
+                elif scheduled_reentry_tick is not None:
+                    if tick >= scheduled_reentry_tick:
                         option_targets = signal_targets(
                             securities,
                             spot,
@@ -197,13 +189,8 @@ def run() -> None:
                             tick,
                             total_ticks,
                         )
-                        last_news = signature
-                        awaiting_news_after = None
-                    elif tick >= awaiting_news_after:
-                        print(
-                            f"WAITING tick={tick}: scheduled news has not appeared yet"
-                        )
-                elif new_information:
+                        scheduled_reentry_tick = None
+                elif not initial_signal_created:
                     option_targets = signal_targets(
                         securities,
                         spot,
@@ -213,7 +200,7 @@ def run() -> None:
                         tick,
                         total_ticks,
                     )
-                    last_news = signature
+                    initial_signal_created = True
 
             # Flattening a 75-contract leg takes at most two child orders.
             for ticker in OPTION_TICKERS:
@@ -235,12 +222,17 @@ def run() -> None:
                 for ticker, sec in securities.items()
             }
             spot = mid(securities["RTM"])
-            delta = portfolio_delta(
-                securities, spot, years, sigma, settings.risk_free_rate
+            delta = (
+                portfolio_delta(
+                    securities, spot, years, sigma, settings.risk_free_rate
+                )
+                if math.isfinite(sigma)
+                else 0.0
             )
             current_stock = positions.get("RTM", 0)
 
-            if awaiting_news_after is not None or just_flattened:
+            warming_up = tick < WARMUP_END_TICK or not math.isfinite(sigma)
+            if scheduled_reentry_tick is not None or just_flattened or warming_up:
                 # The scheduled safety action means completely flat, including RTM.
                 signed = submit_toward(
                     client, "RTM", current_stock, 0, positions, settings
@@ -261,9 +253,13 @@ def run() -> None:
                 )
 
             state = (
-                f"waiting_for_news_{awaiting_news_after}"
-                if awaiting_news_after is not None
-                else "active"
+                "warming_up"
+                if warming_up
+                else (
+                    f"waiting_for_reentry_{scheduled_reentry_tick}"
+                    if scheduled_reentry_tick is not None
+                    else "active"
+                )
             )
             recorder.record_snapshot(
                 period,
@@ -277,7 +273,8 @@ def run() -> None:
             )
             print(
                 f"tick={tick:>3}/{total_ticks} state={state} spot={spot:.2f} "
-                f"forecast_vol={sigma:.1%} source=NEWS delta={delta:,.0f}"
+                f"forecast_vol={sigma:.1%} source=RTM_REALIZED "
+                f"samples={len(observed_prices)} delta={delta:,.0f}"
             )
         except (HTTPError, URLError, TimeoutError) as exc:
             print(f"API error: {exc}")
