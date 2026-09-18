@@ -11,6 +11,7 @@ import math
 import os
 import statistics
 import time
+from dataclasses import replace
 from typing import Any
 from urllib.error import HTTPError, URLError
 
@@ -32,6 +33,8 @@ from strategy import (
 FLATTEN_TO_REENTRY = {73: 74, 148: 149, 223: 224}
 WARMUP_END_TICK = 10
 RV_WINDOW = int(os.getenv("RIT_RV_WINDOW", "30"))
+SIGNAL_RETRY_TICKS = int(os.getenv("RIT_SIGNAL_RETRY_TICKS", "5"))
+MARKET_EDGE_THRESHOLD = float(os.getenv("RIT_MARKET_EDGE_THRESHOLD", "0.05"))
 
 
 def flatten_tick_due(tick: int, completed: set[int]) -> tuple[int, int] | None:
@@ -102,7 +105,7 @@ def signal_targets(
 
 
 def run() -> None:
-    settings = Settings()
+    settings = replace(Settings(), edge_threshold=MARKET_EDGE_THRESHOLD)
     client = RITClient(settings)
 
     option_targets = {ticker: 0 for ticker in OPTION_TICKERS}
@@ -112,6 +115,7 @@ def run() -> None:
     observed_prices: list[float] = []
     last_observed_tick: int | None = None
     initial_signal_created = False
+    next_signal_tick = WARMUP_END_TICK
     recorder = RoundRecorder()
     was_active = False
 
@@ -140,6 +144,7 @@ def run() -> None:
                 observed_prices = []
                 last_observed_tick = None
                 initial_signal_created = False
+                next_signal_tick = WARMUP_END_TICK
                 recorder.start_round(period)
                 print(f"PERIOD {period}: schedule state reset")
 
@@ -166,6 +171,8 @@ def run() -> None:
                 flatten_tick, reentry_tick = due
                 completed_flats.add(flatten_tick)
                 scheduled_reentry_tick = reentry_tick
+                initial_signal_created = False
+                next_signal_tick = reentry_tick
                 option_targets = {ticker: 0 for ticker in OPTION_TICKERS}
                 just_flattened = True
                 print(
@@ -179,7 +186,7 @@ def run() -> None:
                 elif not math.isfinite(sigma):
                     print(f"WAITING tick={tick}: insufficient RTM return history")
                 elif scheduled_reentry_tick is not None:
-                    if tick >= scheduled_reentry_tick:
+                    if tick >= scheduled_reentry_tick and tick >= next_signal_tick:
                         option_targets = signal_targets(
                             securities,
                             spot,
@@ -189,8 +196,15 @@ def run() -> None:
                             tick,
                             total_ticks,
                         )
-                        scheduled_reentry_tick = None
-                elif not initial_signal_created:
+                        if any(option_targets.values()):
+                            scheduled_reentry_tick = None
+                            initial_signal_created = True
+                        else:
+                            next_signal_tick = tick + SIGNAL_RETRY_TICKS
+                            print(
+                                f"RETRY scheduled for tick={next_signal_tick}"
+                            )
+                elif not initial_signal_created and tick >= next_signal_tick:
                     option_targets = signal_targets(
                         securities,
                         spot,
@@ -200,7 +214,11 @@ def run() -> None:
                         tick,
                         total_ticks,
                     )
-                    initial_signal_created = True
+                    if any(option_targets.values()):
+                        initial_signal_created = True
+                    else:
+                        next_signal_tick = tick + SIGNAL_RETRY_TICKS
+                        print(f"RETRY scheduled for tick={next_signal_tick}")
 
             # Flattening a 75-contract leg takes at most two child orders.
             for ticker in OPTION_TICKERS:
