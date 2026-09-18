@@ -65,19 +65,21 @@ Start with the defaults in a practice heat. Confirm the exact option ticker name
 news wording, total ticks, and API port before increasing size. This is a competition
 template, not a guarantee of profit.
 
-## Scheduled pre-news flatten alternative
+## Scheduled pre-announcement flatten alternative
 
 `strategy_scheduled_flatten.py` preserves the version 2 signal and risk logic but
 adds the requested announcement protection:
 
-- Tick 73: flatten every option and RTM position; tick 74: rebuild only after new news.
-- Tick 148: flatten every option and RTM position; tick 149: rebuild only after new news.
-- Tick 223: flatten every option and RTM position; tick 224: rebuild only after new news.
-- If the API has not published a new news item yet, the bot remains flat instead of
-  trading from the previous volatility forecast.
-- At tick 0, the scheduled version requires a parseable volatility announcement;
-  it never opens a position using the 20% fallback assumption. Console output
-  identifies the accepted value with `source=NEWS`.
+- Tick 73: flatten every option and RTM position; tick 74: rebuild from RTM data.
+- Tick 148: flatten every option and RTM position; tick 149: rebuild from RTM data.
+- Tick 223: flatten every option and RTM position; tick 224: rebuild from RTM data.
+- Ticks 0-9 are observation-only: the bot remains completely flat.
+- At tick 10 it estimates volatility from the sample standard deviation of observed
+  RTM mid-price log returns and annualizes it using the case clock.
+- Thereafter it uses a rolling 30-return market-data window. It does not use the
+  20% fallback or the news value for option pricing.
+- Scheduled re-entry at ticks 74, 149, and 224 uses the latest RTM realized-volatility
+  estimate and is identified in the console with `source=RTM_REALIZED`.
 
 Run this alternative with:
 
