@@ -11,6 +11,7 @@ import time
 from typing import Any
 from urllib.error import HTTPError, URLError
 
+from round_recorder import RoundRecorder
 from strategy import (
     OPTION_TICKERS,
     RITClient,
@@ -87,6 +88,8 @@ def run() -> None:
     completed_flats: set[int] = set()
     awaiting_news_after: int | None = None
     last_period: int | None = None
+    recorder = RoundRecorder()
+    was_active = False
 
     print(
         "Scheduled-flatten strategy started. "
@@ -97,8 +100,12 @@ def run() -> None:
         try:
             case = client.case()
             if str(case.get("status", "")).upper() != "ACTIVE":
+                if was_active:
+                    recorder.finish_round(str(case.get("status", "round_ended")))
+                    was_active = False
                 time.sleep(0.5)
                 continue
+            was_active = True
 
             period = int(case.get("period", 1))
             if period != last_period:
@@ -107,6 +114,7 @@ def run() -> None:
                 last_news = None
                 completed_flats.clear()
                 awaiting_news_after = None
+                recorder.start_round(period)
                 print(f"PERIOD {period}: schedule state reset")
 
             tick = int(case.get("tick", 0))
@@ -173,13 +181,16 @@ def run() -> None:
 
             # Flattening a 75-contract leg takes at most two child orders.
             for ticker in OPTION_TICKERS:
-                submit_toward(
+                signed = submit_toward(
                     client,
                     ticker,
                     positions.get(ticker, 0),
                     option_targets[ticker],
                     positions,
                     settings,
+                )
+                recorder.record_trade(
+                    period, tick, ticker, signed, "option_target"
                 )
 
             securities = as_map(client.securities())
@@ -195,22 +206,38 @@ def run() -> None:
 
             if awaiting_news_after is not None or just_flattened:
                 # The scheduled safety action means completely flat, including RTM.
-                submit_toward(
+                signed = submit_toward(
                     client, "RTM", current_stock, 0, positions, settings
+                )
+                recorder.record_trade(
+                    period, tick, "RTM", signed, "scheduled_flatten"
                 )
             elif abs(delta) >= settings.hedge_trigger:
                 target_stock = max(
                     -settings.etf_position_cap,
                     min(settings.etf_position_cap, round(current_stock - delta)),
                 )
-                submit_toward(
+                signed = submit_toward(
                     client, "RTM", current_stock, target_stock, positions, settings
+                )
+                recorder.record_trade(
+                    period, tick, "RTM", signed, "delta_hedge"
                 )
 
             state = (
                 f"waiting_for_news_{awaiting_news_after}"
                 if awaiting_news_after is not None
                 else "active"
+            )
+            recorder.record_snapshot(
+                period,
+                tick,
+                state,
+                spot,
+                sigma,
+                delta,
+                securities.values(),
+                set(OPTION_TICKERS),
             )
             print(
                 f"tick={tick:>3}/{total_ticks} state={state} spot={spot:.2f} "
