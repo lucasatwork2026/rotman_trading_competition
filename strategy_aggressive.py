@@ -8,6 +8,7 @@ and tighter delta hedging while maintaining buffers below the stated limits.
 
 from __future__ import annotations
 
+import csv
 import json
 import math
 import os
@@ -15,6 +16,7 @@ import re
 import signal
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from statistics import NormalDist
 from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
@@ -40,6 +42,11 @@ class Settings:
     hedge_trigger: int = int(os.getenv("RIT_HEDGE_TRIGGER", "1500"))
     stop_opening_ticks: int = int(os.getenv("RIT_STOP_OPENING_TICKS", "8"))
     default_total_ticks: int = int(os.getenv("RIT_TOTAL_TICKS", "600"))
+    option_fee_per_contract: float = float(os.getenv("RIT_OPTION_FEE", "2.00"))
+    etf_fee_per_share: float = float(os.getenv("RIT_ETF_FEE", "0.02"))
+    transaction_log: str = os.getenv(
+        "RIT_TRANSACTION_LOG", "strategy_aggressive_transactions.csv"
+    )
 
     # Buffers below official limits: ETF 50,000; options 2,500 gross/1,000 net.
     etf_position_cap: int = 48_000
@@ -48,6 +55,74 @@ class Settings:
     etf_max_order: int = 10_000
     option_max_order: int = 100
     contract_multiplier: int = 100
+
+
+class TransactionCosts:
+    """Track estimated fees for fills submitted by this process."""
+
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self.option_contracts = 0
+        self.etf_shares = 0
+        self.cumulative_fees = 0.0
+        self._ensure_header()
+
+    def _ensure_header(self) -> None:
+        if os.path.exists(self.settings.transaction_log):
+            return
+        try:
+            with open(self.settings.transaction_log, "w", newline="", encoding="utf-8") as file:
+                csv.writer(file).writerow(
+                    [
+                        "timestamp_utc",
+                        "tick",
+                        "ticker",
+                        "action",
+                        "filled_quantity",
+                        "estimated_fee",
+                        "cumulative_fee",
+                    ]
+                )
+        except OSError as exc:
+            print(f"FEE LOG warning: could not create log file: {exc}")
+
+    def record(
+        self, tick: int, ticker: str, action: str, filled_quantity: int
+    ) -> float:
+        if filled_quantity <= 0:
+            return 0.0
+        if ticker == "RTM":
+            self.etf_shares += filled_quantity
+            fee = filled_quantity * self.settings.etf_fee_per_share
+        else:
+            self.option_contracts += filled_quantity
+            fee = filled_quantity * self.settings.option_fee_per_contract
+        self.cumulative_fees += fee
+        try:
+            with open(
+                self.settings.transaction_log, "a", newline="", encoding="utf-8"
+            ) as file:
+                csv.writer(file).writerow(
+                    [
+                        datetime.now(timezone.utc).isoformat(),
+                        tick,
+                        ticker,
+                        action,
+                        filled_quantity,
+                        f"{fee:.2f}",
+                        f"{self.cumulative_fees:.2f}",
+                    ]
+                )
+        except OSError as exc:
+            print(f"FEE LOG warning: could not append transaction: {exc}")
+        return fee
+
+    def summary(self) -> str:
+        return (
+            f"fees=${self.cumulative_fees:,.2f} "
+            f"(options={self.option_contracts:,} contracts, "
+            f"ETF={self.etf_shares:,} shares)"
+        )
 
 
 class RITClient:
@@ -196,6 +271,8 @@ def submit_toward(
     target: int,
     positions: dict[str, int],
     settings: Settings,
+    costs: TransactionCosts,
+    tick: int,
 ) -> int:
     difference = target - current
     if difference == 0:
@@ -207,10 +284,19 @@ def submit_toward(
     if not risk_ok(positions, ticker, signed, settings):
         print(f"SKIP {ticker}: local position-limit buffer would be exceeded")
         return 0
-    client.market_order(ticker, "BUY" if signed > 0 else "SELL", abs(signed))
-    positions[ticker] = current + signed
-    print(f"ORDER {ticker} {'BUY' if signed > 0 else 'SELL'} {abs(signed)}")
-    return signed
+    action = "BUY" if signed > 0 else "SELL"
+    response = client.market_order(ticker, action, abs(signed))
+    filled = abs(signed)
+    if isinstance(response, dict) and "quantity_filled" in response:
+        filled = max(0, int(response["quantity_filled"]))
+    actual_signed = filled if signed > 0 else -filled
+    positions[ticker] = current + actual_signed
+    fee = costs.record(tick, ticker, action, filled)
+    print(
+        f"ORDER {ticker} {action} requested={abs(signed)} filled={filled} "
+        f"fee=${fee:,.2f} cumulative_fees=${costs.cumulative_fees:,.2f}"
+    )
+    return actual_signed
 
 
 def portfolio_delta(
@@ -258,6 +344,7 @@ def run() -> None:
     running = True
     last_news: tuple[str, ...] | None = None
     option_targets = {ticker: 0 for ticker in OPTION_TICKERS}
+    costs = TransactionCosts(settings)
 
     def stop(*_: Any) -> None:
         nonlocal running
@@ -321,6 +408,8 @@ def run() -> None:
                     option_targets[ticker],
                     positions,
                     settings,
+                    costs,
+                    tick,
                 )
 
             # Re-read positions after option fills, then hedge the full portfolio.
@@ -337,11 +426,19 @@ def run() -> None:
                     min(settings.etf_position_cap, round(current_stock - delta)),
                 )
                 submit_toward(
-                    client, "RTM", current_stock, target_stock, positions, settings
+                    client,
+                    "RTM",
+                    current_stock,
+                    target_stock,
+                    positions,
+                    settings,
+                    costs,
+                    tick,
                 )
             print(
                 f"tick={tick:>3}/{total_ticks} spot={spot:.2f} "
-                f"forecast_vol={sigma:.1%} delta={delta:,.0f}"
+                f"forecast_vol={sigma:.1%} delta={delta:,.0f} "
+                f"{costs.summary()}"
             )
         except (HTTPError, URLError, TimeoutError) as exc:
             print(f"API error: {exc}")
