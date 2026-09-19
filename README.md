@@ -92,6 +92,57 @@ python strategy_scheduled_flatten.py
 
 The original `strategy.py` remains unchanged and available.
 
+## Algorithmic ETF Arbitrage case
+
+`strategy_etf_arbitrage.py` is a separate strategy for the BULL/BEAR/RITC
+case. It does not modify either volatility-case strategy. It trades the
+executable relationship
+
+```text
+RITC price in USD * USD/CAD = BULL price in CAD + BEAR price in CAD
+```
+
+The strategy:
+
+- buys cheap RITC and shorts BULL/BEAR, or shorts rich RITC and buys both
+  stocks, only after bid/ask prices, displayed-depth VWAP, and all three market
+  fees are included;
+- evaluates each fixed-price RITC tender using both immediate ETF liquidation
+  and a stock-hedged route, then takes the more profitable valid route;
+- trades USD back toward zero after ETF transactions;
+- reads the live gross/net limits from `GET /limits`, counts each RITC share
+  twice, and keeps a configurable buffer below the reported limits;
+- respects the 10,000-share maximum security order and 2,500,000-unit maximum
+  currency order; and
+- writes tick metrics plus order/tender events to `etf_logs`.
+
+The two ETF converters are not called because the case rules restrict converter
+use to manual interaction in the RIT Client.
+
+Run it in PowerShell with:
+
+```powershell
+cd $HOME\Documents\rotman_trading_competition-main
+$env:RIT_API_KEY="YOUR_KEY"
+python .\strategy_etf_arbitrage.py
+```
+
+Useful practice-heat settings:
+
+| Variable | Default | Meaning |
+|---|---:|---|
+| `RIT_ETF_ARB_EDGE_CAD` | `0.15` | Minimum net ETF-basket edge per share |
+| `RIT_ETF_TENDER_EDGE_CAD` | `0.10` | Minimum net tender edge per share |
+| `RIT_ETF_ARB_CLIP` | `1000` | Maximum units in one three-leg opportunity |
+| `RIT_ETF_MAX_INVENTORY` | `10000` | Local inventory cap per traded security |
+| `RIT_ETF_LIMIT_BUFFER` | `0.90` | Fraction of live gross/net limits available |
+| `RIT_ETF_POLL_SECONDS` | `0.25` | Delay between loops |
+| `RIT_ETF_LOG_DIR` | `etf_logs` | Output directory for CSV history |
+
+The defaults prioritize executable profit and limit safety. They cannot
+guarantee positive or maximum P&L because tender frequency, spreads, volatility,
+liquidity, order sequencing, and competing algorithms change between heats.
+
 ### Round metrics and P&L files
 
 The scheduled-flatten strategy automatically creates a `rit_logs` folder. It
